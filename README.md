@@ -3,5 +3,5 @@
 | Nama | NRP |
 | :--- | :--- |
 | Aziz Adi Pramana | 5025241195 |
-|  |  |
-|  |  |
+| Afsal Murtaza | 5025241190 |
+|  | 5025241215 |

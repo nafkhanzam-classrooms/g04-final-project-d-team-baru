@@ -1,263 +1,172 @@
 import socket
+import threading
 import json
-import uuid
+import time
 import random
-import os
-import logging
-from datetime import datetime
+import math
 
-# Setup Logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("server_activity.log"),
-        logging.StreamHandler()
-    ]
-)
+HOST = '127.0.0.1'
+PORT = 5555  # Kita pakai port baru 5555 agar bersih
 
-HOST = '0.0.0.0'
-PORT = 5555
+WIDTH, HEIGHT = 800, 600
+TANK_SPEED = 5
+BULLET_SPEED = 8
 
-LEADERBOARD_FILE = "leaderboard.json"
+class TankArenaServer:
+    def __init__(self):
+        self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.server.bind((HOST, PORT))
+        self.server.listen()
+        
+        self.rooms = {} 
+        self.waiting_player = None 
+        print(f"[*] Server Tank Arena berjalan di {HOST}:{PORT}")
 
-def load_leaderboard():
-    if os.path.exists(LEADERBOARD_FILE):
+    def create_room(self, p1_conn, p1_addr):
+        room_id = f"ROOM_{int(time.time())}"
+        map_seed = random.randint(1, 100000)
+        self.rooms[room_id] = {
+            "room_id": room_id, "status": "WAITING", "map_seed": map_seed,
+            "timer": 60, "start_time": None,
+            "players": {"P1": {"conn": p1_conn, "addr": p1_addr, "x": 100, "y": 300, "angle": 0, "score": 0, "hp": 100, "connected": True}},
+            "spectators": [], "bullets": []
+        }
+        return room_id
+
+    def join_room(self, room_id, p2_conn, p2_addr):
+        room = self.rooms[room_id]
+        room["players"]["P2"] = {"conn": p2_conn, "addr": p2_addr, "x": 700, "y": 300, "angle": 180, "score": 0, "hp": 100, "connected": True}
+        
+        # Kirim data INIT
+        p2_conn.send((json.dumps({"type": "INIT", "role": "P2", "room_id": room_id, "seed": room["map_seed"]}) + "\n").encode())
+        p1_conn = room["players"]["P1"]["conn"]
+        p1_conn.send((json.dumps({"type": "INIT", "role": "P1", "room_id": room_id, "seed": room["map_seed"]}) + "\n").encode())
+        
+        time.sleep(0.2) # Jeda waktu agar client tidak crash menerima paket beruntun
+        room["status"] = "PLAYING"
+        room["start_time"] = time.time()
+        threading.Thread(target=self.room_game_loop, args=(room_id,), daemon=True).start()
+
+    def handle_client(self, conn, addr):
+        print(f"[+] Koneksi masuk dari {addr}")
+        player_room_id = None
+        player_role = None
+
         try:
-            with open(LEADERBOARD_FILE, "r") as f:
-                return json.load(f)
-        except:
-            pass
-    return {}
-
-def save_leaderboard(data):
-    with open(LEADERBOARD_FILE, "w") as f:
-        json.dump(data, f)
-
-
-def main():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind((HOST, PORT))
-    
-    logging.info(f"=== UDP Game Server Started on {HOST}:{PORT} ===")
-    
-    # State management
-    leaderboard = load_leaderboard()
-    clients = {} # client_id -> {"addr": (ip, port), "room_id": int, "player_idx": 1 or 2, "username": str}
-    queue = []
-    rooms = {} # room_id -> {"p1": client_id, "p2": client_id, "state": ...}
-    next_room_id = 1
-    
-    def send_to(addr, data_dict):
-        try:
-            sock.sendto(json.dumps(data_dict).encode('utf-8'), addr)
-        except Exception as e:
-            logging.error(f"Failed sending to {addr}: {e}")
-
-    while True:
-        try:
-            data, addr = sock.recvfrom(1024)
+            active_room_id = None
+            for r_id, r_data in self.rooms.items():
+                if r_data["status"] == "PLAYING":
+                    active_room_id = r_id
+                    break
             
-            # --- ANTI-INVALID PACKET SEDERHANA ---
+            if active_room_id:
+                player_room_id = active_room_id
+                player_role = "SPECTATOR"
+                self.rooms[player_room_id]["spectators"].append({"conn": conn, "addr": addr, "connected": True})
+                conn.send((json.dumps({"type": "INIT", "role": player_role, "room_id": player_room_id, "seed": self.rooms[player_room_id]["map_seed"]}) + "\n").encode())
+                print(f"[+ BONUS] {addr} bergabung sebagai SPECTATOR.")
+            elif not self.waiting_player:
+                player_room_id = self.create_room(conn, addr)
+                player_role = "P1"
+                self.waiting_player = player_room_id
+                conn.send((json.dumps({"type": "INIT", "role": player_role, "room_id": player_room_id, "seed": self.rooms[player_room_id]["map_seed"]}) + "\n").encode())
+            else:
+                player_room_id = self.waiting_player
+                player_role = "P2"
+                self.waiting_player = None
+                self.join_room(player_room_id, conn, addr)
+        except Exception as e:
+            conn.close()
+            return
+
+        while True:
             try:
-                msg = json.loads(data.decode('utf-8'))
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                logging.warning(f"Invalid packet format received from {addr}")
-                continue
-                
-            msg_type = msg.get("type")
-            if not msg_type:
-                logging.warning(f"Packet without 'type' from {addr}")
-                continue
-            
-            # --- PING / PONG (Latency Indicator) ---
-            if msg_type == "ping":
-                send_to(addr, {"type": "pong", "time": msg.get("time", 0)})
-                continue
-                
-            client_id = msg.get("client_id")
-            if not client_id:
-                logging.warning(f"Packet without 'client_id' from {addr}")
-                continue
-                
-            # --- RECONNECT HANDLING ---
-            # Jika alamat ip/port berbeda dari yang tersimpan, namun client_id sama, update alamatnya
-            if client_id in clients:
-                if clients[client_id]["addr"] != addr:
-                    logging.info(f"Player {client_id[:8]} reconnected from new address {addr}")
-                    clients[client_id]["addr"] = addr
-            
-            if msg_type == "join":
-                username = msg.get("username", "Guest")
-                if client_id not in clients:
-                    clients[client_id] = {"addr": addr, "room_id": None, "player_idx": None, "username": username}
-                    queue.append(client_id)
-                    logging.info(f"Player {client_id[:8]} ({username}) joined matchmaking queue.")
-                else:
-                    # Update username jika berubah
-                    clients[client_id]["username"] = username
+                data = conn.recv(1024).decode()
+                if not data: break
+                messages = data.strip().split('\n')
+                for message in messages:
+                    if not message: continue
+                    msg = json.loads(message)
                     
-            elif msg_type == "get_leaderboard":
-                sorted_lb = sorted(leaderboard.items(), key=lambda item: item[1], reverse=True)[:5]
-                send_to(addr, {"type": "leaderboard_data", "leaderboard": sorted_lb})
-                continue
-
-            if msg_type == "join": 
-                # --- MATCHMAKING SYSTEM ---
-                # Cek apakah ada cukup pemain untuk membuat room (1 room = 2 player)
-                if len(queue) >= 2:
-                    p1_id = queue.pop(0)
-                    p2_id = queue.pop(0)
-                    room_id = next_room_id
-                    next_room_id += 1
-                    
-                    clients[p1_id]["room_id"] = room_id
-                    clients[p1_id]["player_idx"] = 1
-                    clients[p2_id]["room_id"] = room_id
-                    clients[p2_id]["player_idx"] = 2
-                    
-                    # Generate random map
-                    map_obstacles = []
-                    for _ in range(random.randint(5, 8)):
-                        ox = random.randint(200, 550)
-                        oy = random.randint(50, 450)
-                        ow = random.randint(30, 100)
-                        oh = random.randint(30, 100)
-                        map_obstacles.append({"x": ox, "y": oy, "w": ow, "h": oh})
-                        
-                    rooms[room_id] = {
-                        "p1": p1_id,
-                        "p2": p2_id,
-                        "map": map_obstacles,
-                        "round": 1,
-                        "score": {"1": 0, "2": 0},
-                        "usernames": {"1": clients[p1_id]["username"], "2": clients[p2_id]["username"]},
-                        "game_over": False,
-                        "winner": None,
-                        "state": {
-                            "1": {"x": 100, "y": 300, "angle": "RIGHT", "bullets": [], "hp": 100},
-                            "2": {"x": 700, "y": 300, "angle": "LEFT", "bullets": [], "hp": 100}
-                        }
-                    }
-                    logging.info(f"Match Found! Room {room_id}: Player {p1_id[:8]} vs Player {p2_id[:8]}")
-                    
-                # Beritahu client jika mereka sudah di dalam room (membantu saat reconnect/join spam)
-                c = clients.get(client_id)
-                if c and c["room_id"] is not None:
-                    r = rooms[c["room_id"]]
-                    send_to(c["addr"], {
-                        "type": "match_found", 
-                        "player_idx": c["player_idx"],
-                        "map": r["map"],
-                        "round": r["round"],
-                        "score": r["score"]
-                    })
-                    
-            # --- GAME STATE SYNCHRONIZATION ---
-            elif msg_type == "state":
-                c = clients.get(client_id)
-                if c and c["room_id"] is not None:
-                    room_id = c["room_id"]
-                    pidx = str(c["player_idx"])
-                    
-                    # Update server state
-                    if not rooms[room_id]["game_over"]:
-                        if "x" in msg and "y" in msg:
-                            rooms[room_id]["state"][pidx]["x"] = msg["x"]
-                            rooms[room_id]["state"][pidx]["y"] = msg["y"]
-                        if "angle" in msg:
-                            rooms[room_id]["state"][pidx]["angle"] = msg["angle"]
-                        if "bullets" in msg:
-                            rooms[room_id]["state"][pidx]["bullets"] = msg["bullets"]
-                    
-                    # Broadcast latest state ke kedua player di room
-                    r = rooms[room_id]
-                    p1_addr = clients[r["p1"]]["addr"]
-                    p2_addr = clients[r["p2"]]["addr"]
-                    
-                    update_msg = {
-                        "type": "update",
-                        "state": r["state"],
-                        "score": r["score"],
-                        "round": r["round"],
-                        "usernames": r["usernames"],
-                        "game_over": r["game_over"],
-                        "winner": r["winner"]
-                    }
-                    if r["game_over"]:
-                        # Sort top 5
-                        sorted_lb = sorted(leaderboard.items(), key=lambda item: item[1], reverse=True)[:5]
-                        update_msg["leaderboard"] = sorted_lb
-                        
-                    # Mengirimkan update secara independen
-                    send_to(p1_addr, update_msg)
-                    send_to(p2_addr, update_msg)
-                    
-            # --- HIT DETECTION ---
-            elif msg_type == "hit":
-                c = clients.get(client_id)
-                if c and c["room_id"] is not None:
-                    room_id = c["room_id"]
-                    r = rooms[room_id]
-                    
-                    if r["game_over"]:
+                    if msg["type"] == "PING":
+                        conn.send((json.dumps({"type": "PONG", "timestamp": msg["timestamp"]}) + "\n").encode())
                         continue
-                        
-                    target_idx = str(msg.get("target"))
-                    shooter_idx = str(c["player_idx"])
                     
-                    # Kurangi HP
-                    r["state"][target_idx]["hp"] -= 20
+                    if player_role == "SPECTATOR": continue
                     
-                    if r["state"][target_idx]["hp"] <= 0:
-                        logging.info(f"Player {shooter_idx} killed Player {target_idx} in Room {room_id}")
-                        r["score"][shooter_idx] += 1
-                        
-                        # Cek menang game (Best of 5 -> butuh 3 poin)
-                        if r["score"][shooter_idx] >= 3:
-                            r["game_over"] = True
-                            r["winner"] = int(shooter_idx)
-                            logging.info(f"Room {room_id} GAME OVER. Winner: {shooter_idx}")
-                            
-                            # Update Leaderboard
-                            winner_uname = r["usernames"][shooter_idx]
-                            leaderboard[winner_uname] = leaderboard.get(winner_uname, 0) + 1
-                            save_leaderboard(leaderboard)
-                        else:
-                            # Lanjut ke ronde berikutnya
-                            r["round"] += 1
-                            r["state"]["1"]["hp"] = 100
-                            r["state"]["2"]["hp"] = 100
-                            r["state"]["1"]["x"] = 100
-                            r["state"]["1"]["y"] = 300
-                            r["state"]["2"]["x"] = 700
-                            r["state"]["2"]["y"] = 300
-                            
-                            # Generate map baru
-                            map_obstacles = []
-                            for _ in range(random.randint(5, 8)):
-                                ox = random.randint(200, 550)
-                                oy = random.randint(50, 450)
-                                ow = random.randint(30, 100)
-                                oh = random.randint(30, 100)
-                                map_obstacles.append({"x": ox, "y": oy, "w": ow, "h": oh})
-                            r["map"] = map_obstacles
-                            
-                            logging.info(f"Room {room_id} advances to Round {r['round']}")
-                            
-                            # Kirim sinyal round_reset
-                            reset_msg = {
-                                "type": "round_reset",
-                                "round": r["round"],
-                                "score": r["score"],
-                                "map": map_obstacles,
-                                "state": r["state"]
-                            }
-                            send_to(clients[r["p1"]]["addr"], reset_msg)
-                            send_to(clients[r["p2"]]["addr"], reset_msg)
-                    
-        except Exception as e:
-            logging.error(f"Server exception: {e}")
+                    room = self.rooms.get(player_room_id)
+                    if room and msg["type"] == "INPUT" and room["status"] == "PLAYING":
+                        p_data = room["players"][player_role]
+                        if "MOVE_UP" in msg["keys"]: p_data["y"] = max(50, p_data["y"] - TANK_SPEED)
+                        if "MOVE_DOWN" in msg["keys"]: p_data["y"] = min(HEIGHT-50, p_data["y"] + TANK_SPEED)
+                        if "MOVE_LEFT" in msg["keys"]: p_data["x"] = max(50, p_data["x"] - TANK_SPEED)
+                        if "MOVE_RIGHT" in msg["keys"]: p_data["x"] = min(WIDTH-50, p_data["x"] + TANK_SPEED)
+                        if "ROT_LEFT" in msg["keys"]: p_data["angle"] = (p_data["angle"] + 5) % 360
+                        if "ROT_RIGHT" in msg["keys"]: p_data["angle"] = (p_data["angle"] - 5) % 360
+                        if msg.get("shoot") and len(room["bullets"]) < 10:
+                            room["bullets"].append({"owner": player_role, "x": p_data["x"], "y": p_data["y"], "angle": p_data["angle"]})
+            except:
+                break
+
+        if player_room_id in self.rooms:
+            room = self.rooms[player_room_id]
+            if player_role in room["players"]: room["players"][player_role]["connected"] = False
+            if not room["players"]["P1"]["connected"] and ("P2" not in room["players"] or not room["players"]["P2"]["connected"]):
+                del self.rooms[player_room_id]
+                if self.waiting_player == player_room_id: self.waiting_player = None
+        conn.close()
+
+    def room_game_loop(self, room_id):
+        while room_id in self.rooms:
+            room = self.rooms[room_id]
+            if room["status"] == "PLAYING":
+                elapsed = time.time() - room["start_time"]
+                room["timer"] = max(0, int(60 - elapsed))
+                if room["timer"] <= 0: room["status"] = "ENDED"
+
+                new_bullets = []
+                for b in room["bullets"]:
+                    rad = math.radians(b["angle"])
+                    b["x"] += BULLET_SPEED * math.cos(rad)
+                    b["y"] -= BULLET_SPEED * math.sin(rad)
+                    if 0 < b["x"] < WIDTH and 0 < b["y"] < HEIGHT:
+                        target_role = "P2" if b["owner"] == "P1" else "P1"
+                        target = room["players"].get(target_role)
+                        if target:
+                            distance = math.sqrt((b["x"] - target["x"])**2 + (b["y"] - target["y"])**2)
+                            if distance < 30: 
+                                target["hp"] -= 20
+                                if target["hp"] <= 0:
+                                    room["players"][b["owner"]]["score"] += 1
+                                    target["hp"] = 100
+                                    target["x"], target["y"] = (100, 300) if target_role == "P1" else (700, 300)
+                                continue 
+                        new_bullets.append(b)
+                room["bullets"] = new_bullets
+                self.broadcast_state(room)
+            time.sleep(1/30)
+
+    def broadcast_state(self, room):
+        state_to_send = {
+            "type": "UPDATE", "status": room["status"], "timer": room["timer"],
+            "bullets": [{ "x": b["x"], "y": b["y"] } for b in room["bullets"]],
+            "players": {role: {"x": p["x"], "y": p["y"], "angle": p["angle"], "score": p["score"], "hp": p["hp"], "connected": p["connected"]} for role, p in room["players"].items()}
+        }
+        data_bytes = (json.dumps(state_to_send) + "\n").encode()
+        for role, p in room["players"].items():
+            if p["connected"]:
+                try: p["conn"].send(data_bytes)
+                except: p["connected"] = False
+        for spec in room["spectators"]:
+            try: spec["conn"].send(data_bytes)
+            except: pass
+
+    def start(self):
+        while True:
+            conn, addr = self.server.accept()
+            threading.Thread(target=self.handle_client, args=(conn, addr), daemon=True).start()
 
 if __name__ == "__main__":
-    main()
+    server = TankArenaServer()
+    server.start()

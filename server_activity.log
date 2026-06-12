@@ -1,0 +1,47 @@
+2026-06-12 06:20:47,397 - INFO - === UDP Game Server Started on 0.0.0.0:5555 ===
+2026-06-12 06:20:47,397 - INFO - === UDP Voice Server Started on 0.0.0.0:5556 ===
+2026-06-12 06:21:00,746 - INFO - Player fc7c6e3f (Aziz) connected to lobby.
+2026-06-12 06:21:10,280 - WARNING - Packet without 'client_id' from ('127.0.0.1', 59675)
+2026-06-12 06:21:12,719 - WARNING - Packet without 'client_id' from ('127.0.0.1', 59675)
+2026-06-12 06:21:16,721 - WARNING - Packet without 'client_id' from ('127.0.0.1', 59675)
+2026-06-12 06:21:19,790 - WARNING - Packet without 'client_id' from ('127.0.0.1', 59675)
+2026-06-12 06:21:20,652 - WARNING - Packet without 'client_id' from ('127.0.0.1', 59675)
+2026-06-12 06:21:22,911 - WARNING - Packet without 'client_id' from ('127.0.0.1', 59675)
+2026-06-12 06:21:23,524 - WARNING - Packet without 'client_id' from ('127.0.0.1', 59675)
+2026-06-12 06:21:23,739 - WARNING - Packet without 'client_id' from ('127.0.0.1', 59675)
+2026-06-12 06:21:23,935 - WARNING - Packet without 'client_id' from ('127.0.0.1', 59675)
+2026-06-12 06:21:24,070 - WARNING - Packet without 'client_id' from ('127.0.0.1', 59675)
+2026-06-12 06:21:24,316 - WARNING - Packet without 'client_id' from ('127.0.0.1', 59675)
+2026-06-12 06:21:24,415 - WARNING - Packet without 'client_id' from ('127.0.0.1', 59675)
+2026-06-12 06:21:24,497 - WARNING - Packet without 'client_id' from ('127.0.0.1', 59675)
+2026-06-12 06:21:28,202 - WARNING - Packet without 'client_id' from ('127.0.0.1', 59675)
+2026-06-12 06:21:34,728 - WARNING - Packet without 'client_id' from ('127.0.0.1', 59675)
+2026-06-12 06:21:35,389 - WARNING - Packet without 'client_id' from ('127.0.0.1', 59675)
+2026-06-12 06:21:35,901 - WARNING - Packet without 'client_id' from ('127.0.0.1', 59675)
+2026-06-12 06:21:37,618 - WARNING - Packet without 'client_id' from ('127.0.0.1', 59675)
+2026-06-12 06:21:43,293 - WARNING - Packet without 'client_id' from ('127.0.0.1', 59675)
+2026-06-12 06:21:47,334 - WARNING - Packet without 'client_id' from ('127.0.0.1', 59675)
+2026-06-12 06:27:41,600 - INFO - === UDP Game Server Started on 0.0.0.0:5555 ===
+2026-06-12 06:27:41,600 - INFO - === UDP Voice Server Started on 0.0.0.0:5556 ===
+2026-06-12 06:27:49,753 - INFO - Player 57a5b5bc (Aziz) connected to lobby.
+2026-06-12 06:27:51,045 - INFO - Room 6231 created by Aziz (Private: False)
+2026-06-12 06:28:01,383 - INFO - Player b09d6723 (Budi) connected to lobby.
+2026-06-12 06:28:18,324 - INFO - Room 5766 created by Budi (Private: False)
+2026-06-12 06:28:27,104 - INFO - Player accc073b (Siska) connected to lobby.
+2026-06-12 06:28:34,022 - INFO - Room 6231 Started! Player 57a5b5bc vs Player accc073b
+2026-06-12 06:28:44,473 - INFO - Player 2 killed Player 1 in Room 6231
+2026-06-12 06:28:44,473 - INFO - Room 6231 advances to Round 2
+2026-06-12 06:28:46,910 - INFO - Player 2 killed Player 1 in Room 6231
+2026-06-12 06:28:46,910 - INFO - Room 6231 advances to Round 3
+2026-06-12 06:28:53,132 - INFO - Player 2 killed Player 1 in Room 6231
+2026-06-12 06:28:53,132 - INFO - Room 6231 GAME OVER. Winner: 2
+2026-06-12 07:26:37,855 - INFO - Player 7514657c (Aziz) connected to lobby.
+2026-06-12 07:26:46,183 - INFO - Room 8437 created by Aziz (Private: True)
+2026-06-12 07:26:54,700 - INFO - Player 687a101a (Budi) connected to lobby.
+2026-06-12 07:27:21,309 - INFO - Room 8437 Started! Player 7514657c vs Player 687a101a
+2026-06-12 07:27:32,772 - INFO - Player 1 killed Player 2 in Room 8437
+2026-06-12 07:27:32,772 - INFO - Room 8437 advances to Round 2
+2026-06-12 07:27:34,603 - INFO - Player 1 killed Player 2 in Room 8437
+2026-06-12 07:27:34,603 - INFO - Room 8437 advances to Round 3
+2026-06-12 07:27:38,462 - INFO - Player 1 killed Player 2 in Room 8437
+2026-06-12 07:27:38,462 - INFO - Room 8437 GAME OVER. Winner: 1

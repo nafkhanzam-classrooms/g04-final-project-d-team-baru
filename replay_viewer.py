@@ -1,6 +1,3 @@
-# =====================================================================
-# FILE: replay_viewer.py (TIM INTEGRATED - FIXED BULLETS & QE ROTATION)
-# =====================================================================
 import pygame
 import json
 import sys

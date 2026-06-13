@@ -1,6 +1,3 @@
-# =====================================================================
-# FILE: server.py (UDP SERVER - FIXED GAME OVER CRASH)
-# =====================================================================
 import socket
 import json
 import uuid

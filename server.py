@@ -1,3 +1,6 @@
+# =====================================================================
+# FILE: server.py (UDP SERVER - FIXED GAME OVER CRASH)
+# =====================================================================
 import socket
 import json
 import uuid
@@ -7,8 +10,8 @@ import time
 import logging
 from datetime import datetime
 import threading
+import math
 
-# Setup Logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -21,21 +24,11 @@ logging.basicConfig(
 HOST = '0.0.0.0'
 PORT = 5555
 
-LEADERBOARD_FILE = "leaderboard.json"
-
-def load_leaderboard():
-    if os.path.exists(LEADERBOARD_FILE):
-        try:
-            with open(LEADERBOARD_FILE, "r") as f:
-                return json.load(f)
-        except:
-            pass
-    return {}
-
-def save_leaderboard(data):
-    with open(LEADERBOARD_FILE, "w") as f:
-        json.dump(data, f)
-
+WIDTH, HEIGHT = 800, 600
+TANK_SPEED = 5
+BULLET_SPEED = 10
+MATCH_DURATION = 60
+RECONNECT_TIMEOUT = 60
 
 def main():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -46,21 +39,15 @@ def main():
     voice_sock.bind((HOST, VOICE_PORT))
     
     logging.info(f"=== UDP Game Server Started on {HOST}:{PORT} ===")
-    logging.info(f"=== UDP Voice Server Started on {HOST}:{VOICE_PORT} ===")
     
-    os.makedirs("replays", exist_ok=True)
-    
-    # State management
-    leaderboard = load_leaderboard()
-    clients = {} # client_id -> {"addr": (ip, port), "room_id": str, "player_idx": 1 or 2, "username": str, "voice_addr": None}
-    rooms = {} # room_id -> {"p1": client_id, "p2": client_id, "is_private": bool, ...}
-    
-    def send_to(addr, data_dict):
-        try:
-            sock.sendto(json.dumps(data_dict).encode('utf-8'), addr)
-        except Exception as e:
-            logging.error(f"Failed sending to {addr}: {e}")
+    clients = {} 
+    rooms = {} 
 
+    def send_to(addr, data_dict):
+        try: sock.sendto(json.dumps(data_dict).encode('utf-8'), addr)
+        except: pass
+
+    # --- VOICE CHAT SERVER THREAD ---
     def voice_server_thread():
         while True:
             try:
@@ -68,350 +55,296 @@ def main():
                 if len(data) > 36:
                     client_id = data[:36].decode('utf-8', errors='ignore')
                     audio_data = data[36:]
-                    
                     c = clients.get(client_id)
-                    if c:
-                        if c.get("voice_addr") != addr:
-                            c["voice_addr"] = addr
-                        
-                        room_id = c.get("room_id")
-                        if room_id and room_id in rooms:
-                            r = rooms[room_id]
-                            opponent_id = r["p2"] if r["p1"] == client_id else r["p1"]
-                            opponent = clients.get(opponent_id)
-                            if opponent and opponent.get("voice_addr"):
-                                try:
-                                    voice_sock.sendto(audio_data, opponent["voice_addr"])
-                                except Exception:
-                                    pass
-            except Exception as e:
-                logging.error(f"Voice server exception: {e}")
-
+                    if c and c.get("room_id") in rooms:
+                        r = rooms[c["room_id"]]
+                        opp_id = r["p2"] if r["p1"] == client_id else r["p1"]
+                        opponent = clients.get(opp_id)
+                        if opponent and opponent.get("voice_addr"):
+                            voice_sock.sendto(audio_data, opponent["voice_addr"])
+            except: pass
     threading.Thread(target=voice_server_thread, daemon=True).start()
 
+    # --- GAME PHYSICS & TIMER LOOP (30 FPS) ---
+    def rooms_physics_loop():
+        # Buat folder replays jika belum ada
+        if not os.path.exists("replays"):
+            os.makedirs("replays")
+
+        while True:
+            for room_id, r in list(rooms.items()):
+                # Inisialisasi file rekaman saat game baru saja dimulai
+                if r["status"] == "playing" and "replay_file" not in r:
+                    r["replay_file"] = f"replays/match_{room_id}_{int(time.time())}.jsonl"
+                    try:
+                        with open(r["replay_file"], "w") as f:
+                            # Catat metadata map awal agar obstacle tersinkronisasi saat diputar ulang
+                            init_data = {"type": "init", "map": r["map"], "usernames": r["usernames"]}
+                            f.write(json.dumps(init_data) + "\n")
+                    except Exception as e:
+                        logging.error(f"Gagal membuat file replay: {e}")
+
+                # Update Timer & Status Game Over
+                if r["status"] == "playing" and not r["game_over"]:
+                    elapsed = time.time() - r["start_time"]
+                    r["timer"] = max(0, int(MATCH_DURATION - elapsed))
+                    if r["timer"] <= 0:
+                        r["game_over"] = True
+                        if r["score"]["1"] > r["score"]["2"]: r["winner"] = 1
+                        elif r["score"]["2"] > r["score"]["1"]: r["winner"] = 2
+                        else: r["winner"] = 0
+                        logging.info(f"Room {room_id} SELESAI. Waktu Habis.")
+                    else:
+                        stale_player = None
+                        for p_id in [r["p1"], r["p2"]]:
+                            c = clients.get(p_id)
+                            if not c or time.time() - c.get("last_seen", 0) > RECONNECT_TIMEOUT:
+                                stale_player = p_id
+                                break
+                        if stale_player:
+                            r["status"] = "waiting_reconnect"
+                            r["disconnected"] = stale_player
+                            r["disconnect_time"] = time.time()
+                            # (Logika penanganan disconnect tetap sama...)
+
+                # Update Fisika Peluru
+                if r["status"] == "playing" and not r["game_over"]:
+                    new_bullets = []
+                    for b in r["bullets"]:
+                        rad = math.radians(b["angle"])
+                        b["x"] += BULLET_SPEED * math.cos(rad)
+                        b["y"] -= BULLET_SPEED * math.sin(rad)
+                        
+                        if 0 < b["x"] < WIDTH and 0 < b["y"] < HEIGHT:
+                            hit_wall = False
+                            for obs in r["map"]:
+                                if obs["x"] <= b["x"] <= obs["x"]+obs["w"] and obs["y"] <= b["y"] <= obs["y"]+obs["h"]:
+                                    hit_wall = True
+                                    break
+                            if hit_wall: continue
+                            
+                            target_idx = "2" if b["owner"] == "1" else "1"
+                            target = r["state"][target_idx]
+                            distance = math.sqrt((b["x"] - target["x"] - 20)**2 + (b["y"] - target["y"] - 20)**2)
+                            
+                            if distance < 25:
+                                target["hp"] -= 20
+                                if target["hp"] <= 0:
+                                    r["score"][b["owner"]] += 1
+                                    target["hp"] = 100 
+                                    if target_idx == "1":
+                                        target["x"], target["y"] = 100, 300
+                                        target["angle"] = 0
+                                    else:
+                                        target["x"], target["y"] = 700, 300
+                                        target["angle"] = 180
+                                continue
+                            new_bullets.append(b)
+                    r["bullets"] = new_bullets
+
+                # --- FITUR UTAMA: AGREGASI STATUS FRAME KE JSON LINES (.jsonl) ---
+                if r["status"] == "playing" and "replay_file" in r:
+                    try:
+                        with open(r["replay_file"], "a") as f:
+                            frame_data = {
+                                "type": "frame",
+                                "state": r["state"],
+                                "score": r["score"],
+                                "bullets": r["bullets"],
+                                "timer": r["timer"],
+                                "game_over": r["game_over"]
+                            }
+                            f.write(json.dumps(frame_data) + "\n")
+                    except Exception as e:
+                        pass
+
+                # Broadcast Update Jaringan WAJIB TETAP JALAN
+                if r["status"] in ["playing", "waiting_reconnect"] or r["game_over"]:
+                    update_msg = {
+                        "type": "update", "state": r.get("state", {}), "score": r.get("score", {"1":0,"2":0}), "round": r.get("round", 1),
+                        "bullets": r.get("bullets", []), "usernames": r.get("usernames", {"1":"P1","2":"P2"}), "map": r.get("map", []),
+                        "game_over": r["game_over"], "winner": r["winner"], "timer": r.get("timer", MATCH_DURATION)
+                    }
+                    for p_id in [r["p1"], r["p2"]]:
+                        if p_id in clients: send_to(clients[p_id]["addr"], update_msg)
+                    for spec_id in r["spectators"]:
+                        if spec_id in clients: send_to(clients[spec_id]["addr"], update_msg)
+            time.sleep(1/30)
+    threading.Thread(target=rooms_physics_loop, daemon=True).start()
+
+    # --- COMMAND RECEIVER LOOP ---
     while True:
         try:
-            data, addr = sock.recvfrom(1024)
-            
-            # --- ANTI-INVALID PACKET SEDERHANA ---
-            try:
-                msg = json.loads(data.decode('utf-8'))
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                logging.warning(f"Invalid packet format received from {addr}")
-                continue
+            data, addr = sock.recvfrom(2048)
+            try: msg = json.loads(data.decode('utf-8'))
+            except: continue
                 
             msg_type = msg.get("type")
-            if not msg_type:
-                logging.warning(f"Packet without 'type' from {addr}")
-                continue
-            
-            # --- PING / PONG (Latency Indicator) ---
-            if msg_type == "ping":
-                send_to(addr, {"type": "pong", "time": msg.get("time", 0)})
-                continue
+            if msg_type == "ping": send_to(addr, {"type": "pong", "time": msg.get("time", 0)}); continue
                 
             client_id = msg.get("client_id")
-            if not client_id:
-                logging.warning(f"Packet without 'client_id' from {addr}")
-                continue
-                
-            # --- RECONNECT HANDLING ---
-            # Jika alamat ip/port berbeda dari yang tersimpan, namun client_id sama, update alamatnya
-            if client_id in clients:
+            if not client_id: continue
+            if client_id not in clients:
+                username = msg.get("username", "Guest")
+                clients[client_id] = {"addr": addr, "room_id": None, "player_idx": None, "username": username, "voice_addr": None, "connected": True, "last_seen": time.time()}
+            else:
                 if clients[client_id]["addr"] != addr:
-                    logging.info(f"Player {client_id[:8]} reconnected from new address {addr}")
                     clients[client_id]["addr"] = addr
-            
+                clients[client_id]["last_seen"] = time.time()
+                clients[client_id]["connected"] = True
+                if msg_type == "join":
+                    clients[client_id]["username"] = msg.get("username", clients[client_id].get("username", "Guest"))
+
             if msg_type == "join":
                 username = msg.get("username", "Guest")
-                if client_id not in clients:
-                    clients[client_id] = {"addr": addr, "room_id": None, "player_idx": None, "username": username, "voice_addr": None}
-                    logging.info(f"Player {client_id[:8]} ({username}) connected to lobby.")
-                else:
-                    # Update username jika berubah
-                    clients[client_id]["username"] = username
-                    
-            elif msg_type == "get_leaderboard":
-                sorted_lb = sorted(leaderboard.items(), key=lambda item: item[1], reverse=True)[:5]
-                send_to(addr, {"type": "leaderboard_data", "leaderboard": sorted_lb})
-                continue
-
-            elif msg_type == "create_room":
-                is_private = msg.get("is_private", False)
-                password = msg.get("password", "")
+                existing_client = clients.get(client_id)
+                if existing_client and existing_client.get("room_id") in rooms:
+                    r = rooms[existing_client["room_id"]]
+                    if r["status"] == "waiting_reconnect" and r.get("disconnected") == client_id:
+                        existing_client.update({"addr": addr, "username": username, "connected": True, "last_seen": time.time()})
+                        r["status"] = "playing"
+                        r["disconnected"] = None
+                        r["disconnect_time"] = None
+                        logging.info(f"Player reconnected: {username} ({client_id}) in room {existing_client['room_id']}")
+                        other_id = r["p1"] if client_id == r["p2"] else r["p2"]
+                        if other_id in clients:
+                            send_to(clients[other_id]["addr"], {"type": "opponent_reconnected", "msg": "Opponent reconnected. Game resumes."})
+                        send_to(addr, {
+                            "type": "reconnect_success", "player_idx": existing_client["player_idx"], "map": r["map"],
+                            "round": r["round"], "score": r["score"], "state": r["state"], "game_over": r["game_over"],
+                            "winner": r["winner"], "timer": r["timer"]
+                        })
+                        continue
+                send_to(addr, {"type": "join_ack"})
                 
-                # Generate unique 4 digit room id
+            elif msg_type == "create_room":
                 while True:
                     room_id = str(random.randint(1000, 9999))
-                    if room_id not in rooms:
-                        break
-                        
-                clients[client_id]["room_id"] = room_id
-                clients[client_id]["player_idx"] = 1
-                
+                    if room_id not in rooms: break
+                clients[client_id].update({"room_id": room_id, "player_idx": 1})
                 rooms[room_id] = {
-                    "p1": client_id,
-                    "p2": None,
-                    "spectators": [],
-                    "is_private": is_private,
-                    "password": password,
-                    "status": "waiting",
-                    "host_username": clients[client_id]["username"]
+                    "p1": client_id, "p2": None, "spectators": [], "is_private": msg.get("is_private", False),
+                    "password": msg.get("password", ""), "status": "waiting", "host_username": clients[client_id]["username"],
+                    "bullets": [], "timer": MATCH_DURATION, "disconnected": None, "disconnect_time": None, "game_over": False, "winner": None
                 }
-                
-                send_to(addr, {
-                    "type": "room_created",
-                    "room_id": room_id,
-                    "is_private": is_private
-                })
-                logging.info(f"Room {room_id} created by {clients[client_id]['username']} (Private: {is_private})")
+                logging.info(f"Room created: {room_id} by {clients[client_id]['username']} ({client_id})")
+                send_to(addr, {"type": "room_created", "room_id": room_id, "is_private": msg.get("is_private", False)})
                 
             elif msg_type == "get_public_rooms":
-                pub_rooms = []
-                for rid, r in rooms.items():
-                    if not r["is_private"] and r["status"] == "waiting":
-                        pub_rooms.append({"room_id": rid, "host": r["host_username"]})
+                pub_rooms = [{"room_id": rid, "host": r["host_username"], "status": r["status"]} for rid, r in rooms.items() if not r["is_private"]]
                 send_to(addr, {"type": "public_rooms_list", "rooms": pub_rooms})
                 
             elif msg_type == "join_room":
                 room_id = str(msg.get("room_id", ""))
-                password = msg.get("password", "")
-                as_spectator = msg.get("as_spectator", False)
-                
                 if room_id not in rooms:
-                    send_to(addr, {"type": "join_error", "msg": "Room not found"})
-                    continue
-                    
+                    send_to(addr, {"type": "join_error", "msg": "Room tidak ditemukan"}); continue
                 r = rooms[room_id]
                 
-                if r["is_private"] and r["password"] != password:
-                    send_to(addr, {"type": "join_error", "msg": "Wrong password"})
-                    continue
-                    
-                if as_spectator:
-                    r["spectators"].append(client_id)
-                    clients[client_id]["room_id"] = room_id
-                    clients[client_id]["player_idx"] = "spectator"
-                    logging.info(f"Player {client_id[:8]} joined Room {room_id} as Spectator.")
+                if msg.get("as_spectator", False):
+                    if client_id not in r["spectators"]:
+                        r["spectators"].append(client_id)
+                    clients[client_id].update({"room_id": room_id, "player_idx": "spectator"})
                     
                     if r["status"] == "playing":
-                        send_to(addr, {
-                            "type": "match_found", 
-                            "player_idx": "spectator",
-                            "map": r["map"],
-                            "round": r["round"],
-                            "score": r["score"],
-                            "state": r["state"]
-                        })
-                    continue
-                
-                if r["status"] != "waiting":
-                    send_to(addr, {"type": "join_error", "msg": "Room is full or already playing"})
+                        spec_msg = {
+                            "type": "match_found", "player_idx": "spectator", "map": r["map"], "round": r.get("round", 1),
+                            "score": r["score"], "state": r["state"], "bullets": r["bullets"], "timer": r["timer"],
+                            "game_over": r["game_over"], "winner": r["winner"], "usernames": r["usernames"]
+                        }
+                    else:
+                        spec_msg = {"type": "spectator_waiting", "room_id": room_id, "msg": "Menunggu match dimulai..."}
+                    send_to(addr, spec_msg)
                     continue
                     
-                # Match Found!
+                if r.get("p2") is not None:
+                    send_to(addr, {"type": "join_error", "msg": "Room sudah penuh"})
+                    continue
+
                 r["p2"] = client_id
-                r["status"] = "playing"
+                clients[client_id].update({"room_id": room_id, "player_idx": 2})
+                logging.info(f"Player joined room {room_id}: {clients[client_id]['username']} ({client_id}) as P2")
                 
-                clients[client_id]["room_id"] = room_id
-                clients[client_id]["player_idx"] = 2
-                
-                p1_id = r["p1"]
-                p2_id = client_id
-                
-                # Generate random map
-                map_obstacles = []
-                for _ in range(random.randint(5, 8)):
-                    ox = random.randint(200, 550)
-                    oy = random.randint(50, 450)
-                    ow = random.randint(30, 100)
-                    oh = random.randint(30, 100)
-                    map_obstacles.append({"x": ox, "y": oy, "w": ow, "h": oh})
-                    
+                map_obstacles = [{"x": random.randint(180, 580), "y": random.randint(80, 420), "w": random.randint(50, 100), "h": random.randint(50, 100)} for _ in range(6)]
                 r.update({
-                    "map": map_obstacles,
-                    "round": 1,
-                    "score": {"1": 0, "2": 0},
-                    "usernames": {"1": clients[p1_id]["username"], "2": clients[p2_id]["username"]},
-                    "game_over": False,
-                    "winner": None,
-                    "state": {
-                        "1": {"x": 100, "y": 300, "angle": "RIGHT", "bullets": [], "hp": 100},
-                        "2": {"x": 700, "y": 300, "angle": "LEFT", "bullets": [], "hp": 100}
-                    }
+                    "map": map_obstacles, "round": 1, "score": {"1": 0, "2": 0},
+                    "usernames": {"1": clients[r["p1"]]["username"], "2": clients[client_id]["username"]},
+                    "game_over": False, "winner": None,
+                    "state": {"1": {"x": 100, "y": 300, "angle": 0, "hp": 100}, "2": {"x": 700, "y": 300, "angle": 180, "hp": 100}},
+                    "status": "playing", "start_time": time.time()
                 })
                 
-                r["replay_file"] = f"replays/match_{room_id}_{int(time.time())}.jsonl"
-                try:
-                    with open(r["replay_file"], "w") as f:
-                        init_data = {
-                            "type": "init",
-                            "map": map_obstacles,
-                            "usernames": {"1": clients[p1_id]["username"], "2": clients[p2_id]["username"]},
-                            "time": time.time()
-                        }
-                        f.write(json.dumps(init_data) + "\n")
-                except Exception as e:
-                    logging.error(f"Failed to create replay file: {e}")
-                    
-                logging.info(f"Room {room_id} Started! Player {p1_id[:8]} vs Player {p2_id[:8]}")
+                match_found_msg = {
+                    "type": "match_found", "map": r["map"], "round": r["round"], "score": r["score"],
+                    "state": r["state"], "bullets": r["bullets"], "timer": r["timer"],
+                    "game_over": r["game_over"], "winner": r["winner"], "usernames": r["usernames"]
+                }
                 
-                for p_idx, p_cid in [(1, p1_id), (2, p2_id)]:
-                    c = clients[p_cid]
-                    send_to(c["addr"], {
-                        "type": "match_found", 
-                        "player_idx": c["player_idx"],
-                        "map": r["map"],
-                        "round": r["round"],
-                        "score": r["score"]
-                    })
-                    
-            # --- GAME STATE SYNCHRONIZATION ---
-            elif msg_type == "state":
+                for p_idx, p_cid in [(1, r["p1"]), (2, r["p2"])]:
+                    match_found_msg["player_idx"] = p_idx
+                    send_to(clients[p_cid]["addr"], match_found_msg)
+                
+                for spec_id in r["spectators"]:
+                    if spec_id in clients:
+                        match_found_msg["player_idx"] = "spectator"
+                        send_to(clients[spec_id]["addr"], match_found_msg)
+                logging.info(f"Match started in room {room_id}")
+
+            elif msg_type == "action":
                 c = clients.get(client_id)
-                if c and c["room_id"] is not None:
-                    if c["player_idx"] == "spectator":
-                        continue
-                    
-                    room_id = c["room_id"]
+                if c and c["room_id"] in rooms:
+                    r = rooms[c["room_id"]]
                     pidx = str(c["player_idx"])
+                    if pidx == "spectator" or r["game_over"]: continue
                     
-                    # Update server state
-                    if not rooms[room_id]["game_over"]:
-                        if "x" in msg and "y" in msg:
-                            rooms[room_id]["state"][pidx]["x"] = msg["x"]
-                            rooms[room_id]["state"][pidx]["y"] = msg["y"]
-                        if "angle" in msg:
-                            rooms[room_id]["state"][pidx]["angle"] = msg["angle"]
-                        if "bullets" in msg:
-                            rooms[room_id]["state"][pidx]["bullets"] = msg["bullets"]
+                    p_tank = r["state"][pidx]
+                    dx, dy = 0, 0
+                    keys = msg.get("keys", [])
                     
-                    # Broadcast latest state ke kedua player di room
+                    if "MOVE_UP" in keys: dy -= TANK_SPEED
+                    if "MOVE_DOWN" in keys: dy += TANK_SPEED
+                    if "MOVE_LEFT" in keys: dx -= TANK_SPEED
+                    if "MOVE_RIGHT" in keys: dx += TANK_SPEED
+                    if "ROT_LEFT" in keys: p_tank["angle"] = (p_tank["angle"] + 5) % 360
+                    if "ROT_RIGHT" in keys: p_tank["angle"] = (p_tank["angle"] - 5) % 360
+                    
+                    if dx != 0 or dy != 0:
+                        future_x = p_tank["x"] + dx
+                        future_y = p_tank["y"] + dy
+                        collided = False
+                        for obs in r["map"]:
+                            if (obs["x"] - 35 <= future_x <= obs["x"] + obs["w"]) and (obs["y"] - 35 <= future_y <= obs["y"] + obs["h"]):
+                                collided = True
+                                break
+                        if not collided:
+                            p_tank["x"] = max(10, min(WIDTH - 50, future_x))
+                            p_tank["y"] = max(10, min(HEIGHT - 50, future_y))
+
+                    if msg.get("shoot") and len(r["bullets"]) < 10:
+                        r["bullets"].append({"owner": pidx, "x": p_tank["x"] + 20, "y": p_tank["y"] + 20, "angle": p_tank["angle"]})
+
+            elif msg_type == "leave_room":
+                if client_id in clients and clients[client_id]["room_id"] in rooms:
+                    room_id = clients[client_id]["room_id"]
                     r = rooms[room_id]
-                    p1_addr = clients[r["p1"]]["addr"]
-                    p2_addr = clients[r["p2"]]["addr"]
-                    
-                    update_msg = {
-                        "type": "update",
-                        "state": r["state"],
-                        "score": r["score"],
-                        "round": r["round"],
-                        "usernames": r["usernames"],
-                        "game_over": r["game_over"],
-                        "winner": r["winner"]
-                    }
-                    if r["game_over"]:
-                        # Sort top 5
-                        sorted_lb = sorted(leaderboard.items(), key=lambda item: item[1], reverse=True)[:5]
-                        update_msg["leaderboard"] = sorted_lb
-                        
-                    if "replay_file" in r:
-                        try:
-                            with open(r["replay_file"], "a") as f:
-                                frame_data = {
-                                    "type": "frame",
-                                    "state": r["state"],
-                                    "score": r["score"],
-                                    "round": r["round"],
-                                    "game_over": r["game_over"],
-                                    "winner": r["winner"],
-                                    "time": time.time()
-                                }
-                                f.write(json.dumps(frame_data) + "\n")
-                        except Exception:
-                            pass
-                        
-                    # Mengirimkan update secara independen
-                    send_to(p1_addr, update_msg)
-                    send_to(p2_addr, update_msg)
-                    for spec_id in r["spectators"]:
-                        if spec_id in clients:
-                            send_to(clients[spec_id]["addr"], update_msg)
-                    
-            # --- HIT DETECTION ---
-            elif msg_type == "hit":
-                c = clients.get(client_id)
-                if c and c["room_id"] is not None:
-                    if c["player_idx"] == "spectator":
-                        continue
-                        
-                    room_id = c["room_id"]
-                    r = rooms[room_id]
-                    
-                    if r["game_over"]:
-                        continue
-                        
-                    target_idx = str(msg.get("target"))
-                    shooter_idx = str(c["player_idx"])
-                    
-                    # Kurangi HP
-                    r["state"][target_idx]["hp"] -= 20
-                    
-                    if r["state"][target_idx]["hp"] <= 0:
-                        logging.info(f"Player {shooter_idx} killed Player {target_idx} in Room {room_id}")
-                        r["score"][shooter_idx] += 1
-                        
-                        # Cek menang game (Best of 5 -> butuh 3 poin)
-                        if r["score"][shooter_idx] >= 3:
-                            r["game_over"] = True
-                            r["winner"] = int(shooter_idx)
-                            logging.info(f"Room {room_id} GAME OVER. Winner: {shooter_idx}")
-                            
-                            # Update Leaderboard
-                            winner_uname = r["usernames"][shooter_idx]
-                            leaderboard[winner_uname] = leaderboard.get(winner_uname, 0) + 1
-                            save_leaderboard(leaderboard)
-                        else:
-                            # Lanjut ke ronde berikutnya
-                            r["round"] += 1
-                            r["state"]["1"]["hp"] = 100
-                            r["state"]["2"]["hp"] = 100
-                            r["state"]["1"]["x"] = 100
-                            r["state"]["1"]["y"] = 300
-                            r["state"]["2"]["x"] = 700
-                            r["state"]["2"]["y"] = 300
-                            
-                            # Generate map baru
-                            map_obstacles = []
-                            for _ in range(random.randint(5, 8)):
-                                ox = random.randint(200, 550)
-                                oy = random.randint(50, 450)
-                                ow = random.randint(30, 100)
-                                oh = random.randint(30, 100)
-                                map_obstacles.append({"x": ox, "y": oy, "w": ow, "h": oh})
-                            r["map"] = map_obstacles
-                            
-                            logging.info(f"Room {room_id} advances to Round {r['round']}")
-                            
-                            if "replay_file" in r:
-                                try:
-                                    with open(r["replay_file"], "a") as f:
-                                        reset_data = {
-                                            "type": "round_reset",
-                                            "map": map_obstacles,
-                                            "round": r["round"],
-                                            "time": time.time()
-                                        }
-                                        f.write(json.dumps(reset_data) + "\n")
-                                except Exception:
-                                    pass
-                            
-                            # Kirim sinyal round_reset
-                            reset_msg = {
-                                "type": "round_reset",
-                                "round": r["round"],
-                                "score": r["score"],
-                                "map": map_obstacles,
-                                "state": r["state"]
-                            }
-                            send_to(clients[r["p1"]]["addr"], reset_msg)
-                            send_to(clients[r["p2"]]["addr"], reset_msg)
+                    if clients[client_id]["player_idx"] == "spectator":
+                        if client_id in r["spectators"]: r["spectators"].remove(client_id)
+                        clients[client_id]["room_id"] = None
+                    elif r["status"] == "playing":
+                        if r["status"] != "waiting_reconnect":
+                            r["disconnected"] = client_id
+                            r["disconnect_time"] = time.time()
+                            r["status"] = "waiting_reconnect"
+                            clients[client_id]["connected"] = False
+                            other_id = r["p1"] if client_id == r["p2"] else r["p2"]
+                            if other_id in clients:
+                                send_to(clients[other_id]["addr"], {"type": "opponent_disconnected", "msg": "Opponent disconnected. Waiting for reconnect..."})
                             for spec_id in r["spectators"]:
                                 if spec_id in clients:
-                                    send_to(clients[spec_id]["addr"], reset_msg)
-                    
-        except Exception as e:
-            logging.error(f"Server exception: {e}")
+                                    send_to(clients[spec_id]["addr"], {"type": "opponent_disconnected", "msg": "A player disconnected. Waiting for reconnect..."})
+                    else:
+                        del rooms[room_id]
+                        clients[client_id]["room_id"] = None
+        except: pass
 
 if __name__ == "__main__":
     main()

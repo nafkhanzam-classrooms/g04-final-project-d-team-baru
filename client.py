@@ -1,3 +1,6 @@
+# =====================================================================
+# FILE: client.py
+# =====================================================================
 import pygame
 import socket
 import json
@@ -24,6 +27,7 @@ sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.setblocking(True)
 
 voice_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+voice_sock.bind(("", 0))
 voice_sock.setblocking(False)
 VOICE_SERVER_PORT = SERVER_PORT + 1
 
@@ -270,6 +274,9 @@ while running:
             screen.blit(big_font.render("Menunggu match dimulai...", True, (200, 200, 200)), (230, 230))
             screen.blit(font.render("Tekan ESC untuk kembali ke Main Menu.", True, (150, 150, 150)), (250, 400))
         else:
+            if disconnect_alert:
+                alert_surf = font.render(disconnect_alert, True, (255, 200, 50))
+                screen.blit(alert_surf, (400 - alert_surf.get_width()//2, 40))
             if not is_spectator:
                 keys = pygame.key.get_pressed()
                 keys_to_send = []

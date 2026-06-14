@@ -1,3 +1,6 @@
+# =====================================================================
+# FILE: server.py (UDP SERVER - FIXED GAME OVER CRASH)
+# =====================================================================
 import socket
 import json
 import uuid
@@ -53,12 +56,14 @@ def main():
                     client_id = data[:36].decode('utf-8', errors='ignore')
                     audio_data = data[36:]
                     c = clients.get(client_id)
-                    if c and c.get("room_id") in rooms:
-                        r = rooms[c["room_id"]]
-                        opp_id = r["p2"] if r["p1"] == client_id else r["p1"]
-                        opponent = clients.get(opp_id)
-                        if opponent and opponent.get("voice_addr"):
-                            voice_sock.sendto(audio_data, opponent["voice_addr"])
+                    if c:
+                        c["voice_addr"] = addr
+                        if c.get("room_id") in rooms:
+                            r = rooms[c["room_id"]]
+                            opp_id = r["p2"] if r["p1"] == client_id else r["p1"]
+                            opponent = clients.get(opp_id)
+                            if opponent and opponent.get("voice_addr"):
+                                voice_sock.sendto(audio_data, opponent["voice_addr"])
             except: pass
     threading.Thread(target=voice_server_thread, daemon=True).start()
 
@@ -99,9 +104,16 @@ def main():
                                 stale_player = p_id
                                 break
                         if stale_player:
-                            r["status"] = "waiting_reconnect"
-                            r["disconnected"] = stale_player
-                            r["disconnect_time"] = time.time()
+                            if r["status"] != "waiting_reconnect":
+                                r["status"] = "waiting_reconnect"
+                                r["disconnected"] = stale_player
+                                r["disconnect_time"] = time.time()
+                                other_id = r["p1"] if stale_player == r["p2"] else r["p2"]
+                                if other_id in clients:
+                                    send_to(clients[other_id]["addr"], {"type": "opponent_disconnected", "msg": "Opponent disconnected. Waiting for reconnect..."})
+                                for spec_id in r["spectators"]:
+                                    if spec_id in clients:
+                                        send_to(clients[spec_id]["addr"], {"type": "opponent_disconnected", "msg": "A player disconnected. Waiting for reconnect..."})
                             # (Logika penanganan disconnect tetap sama...)
 
                 # Update Fisika Peluru
@@ -160,7 +172,8 @@ def main():
                     update_msg = {
                         "type": "update", "state": r.get("state", {}), "score": r.get("score", {"1":0,"2":0}), "round": r.get("round", 1),
                         "bullets": r.get("bullets", []), "usernames": r.get("usernames", {"1":"P1","2":"P2"}), "map": r.get("map", []),
-                        "game_over": r["game_over"], "winner": r["winner"], "timer": r.get("timer", MATCH_DURATION)
+                        "game_over": r["game_over"], "winner": r["winner"], "timer": r.get("timer", MATCH_DURATION),
+                        "disconnect_alert": "Opponent disconnected. Waiting for reconnect..." if r["status"] == "waiting_reconnect" else ""
                     }
                     for p_id in [r["p1"], r["p2"]]:
                         if p_id in clients: send_to(clients[p_id]["addr"], update_msg)

@@ -6,6 +6,8 @@
 | Afsal Murtaza | 5025241190 |
 | Khairan Cherokee Musthofa | 5025241215 |
 
+[Demo cara Kerja Singkat](https://youtu.be/Wl6iLyD1NzY)
+
 # Penjelasan kode
 
 ## `Server.py`
